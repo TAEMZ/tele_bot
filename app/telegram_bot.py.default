@@ -1,0 +1,93 @@
+from app.model import generate_response
+from app.memory import add_to_memory, clear_user_memory, get_all_memories
+from app.metrics import RequestTimer
+from app.translator import detect_language
+import telebot
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TELEGRAM_TOKEN = "7962443530:AAHH6mdIexuTKw9J2Js0SMtwJ5Jtfe8yNe8"
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = str(message.from_user.id)
+    welcome_msg = (
+        "Hello! I am your AI medical assistant. How can I help you today?\n\n"
+        "I can help with:\n"
+        "• Symptom advice (headache, fever, stomach pain, etc.)\n"
+        "• Drug information\n"
+        "• General health questions\n\n"
+        "I understand multiple languages including Amharic (አማርኛ), Afan Oromo, Tigrinya (ትግርኛ), and Somali!\n"
+        "Just ask your question in any language and I'll respond in the same language.\n\n"
+        "Commands:\n"
+        "/clear - Clear conversation memory"
+    )
+    bot.reply_to(message, welcome_msg)
+
+@bot.message_handler(commands=['clear'])
+def clear_memory(message):
+    user_id = str(message.from_user.id)
+    clear_user_memory(user_id)
+    bot.reply_to(message, "✅ Conversation memory cleared. Starting fresh!")
+    logger.info(f"Cleared memory for user {user_id}")
+
+@bot.message_handler(commands=['memory'])
+def show_memory(message):
+    user_id = str(message.from_user.id)
+    memories = get_all_memories(user_id)
+    if not memories:
+        bot.reply_to(message, "No conversation history found.")
+        return
+
+    memory_text = "📝 Your conversation history:\n\n"
+    for i, mem in enumerate(memories[:5], 1):
+        memory_text += f"{i}. {mem.get('memory', 'N/A')}\n"
+
+    bot.reply_to(message, memory_text)
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_message = message.text
+    user_id = str(message.from_user.id)
+    logger.info(f"Received message from user {user_id}: {user_message}")
+
+    # Detect language for metrics
+    try:
+        lang = detect_language(user_message)
+    except:
+        lang = 'en'
+
+    # Track request with metrics
+    with RequestTimer(user_id=user_id, language=lang) as timer:
+        try:
+            # Generate response with automatic translation
+            start_ai = time.time()
+            response = generate_response(user_message, user_id=user_id)
+            ai_time = time.time() - start_ai
+
+            # Set AI generation time for metrics
+            timer.set_ai_time(ai_time)
+
+            if "Assistant:" in response:
+                response = response.split("Assistant:")[-1].strip()
+
+            logger.info(f"Generated response: {response}")
+            bot.reply_to(message, response)
+
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            bot.reply_to(message, "Sorry, I encountered an error. Please try again.")
+            raise  # Re-raise to mark as error in metrics
+
+    # Memory disabled for faster responses
+    # Uncomment below to enable conversation memory (adds 5-10s delay)
+    # try:
+    #     add_to_memory(user_id, user_message, role="user")
+    #     add_to_memory(user_id, response, role="assistant")
+    # except Exception as e:
+    #     logger.error(f"Memory storage error (non-critical): {e}")

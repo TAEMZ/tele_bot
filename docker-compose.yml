@@ -1,0 +1,93 @@
+version: '3.10'
+
+services:
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: medical-bot
+    volumes:
+      - .:/app:cached
+    depends_on:
+      - searxng
+      - ollama
+      - qdrant
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    networks:
+      - appnet
+    env_file:
+      - app/.env
+    environment:
+      - SEARX_HOST=http://searxng:8080
+      - OPENFDA_BASE=https://api.fda.gov
+      - OLLAMA_HOST=http://ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    ports:
+      - "8001:8000"
+
+  redis:
+    image: docker.io/valkey/valkey:8-alpine
+    container_name: redis
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - appnet
+    volumes:
+      - valkey-data:/data
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks:
+      - appnet
+    depends_on:
+      - redis
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=4
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+    networks:
+      - appnet
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c", "\
+      ollama serve & \
+      sleep 5 && \
+      ollama pull qwen3:1.7b && \
+      ollama pull nomic-embed-text:latest && \
+      wait"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - appnet
+    restart: unless-stopped
+
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  valkey-data:
+  qdrant-data:

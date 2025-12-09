@@ -1,0 +1,154 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+app/.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+.classpath
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+*.log
+
+# Data directories (Docker volumes and local data)
+ollama/
+qdrant-data/
+valkey-data/
+searxng/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# SSH keys and private keys (CRITICAL - never commit these!)
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.ssh
+**/id_*
+**/*_rsa
+**/*_ed25519
+**/*_dsa
+**/*_ecdsa
+**/*_ecdsa_sk
+**/*_ed25519_sk
+known_hosts
+authorized_keys
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+.cache/
+*.cache
+
+# Test coverage
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+.hypothesis/
+
+# Model files and large binaries
+*.model
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Archive files (tar, zip, etc.)
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.rar
+*.7z
+*.gz
+*.bz2
+*.xz
+
+# Claude settings (may contain sensitive info)
+.claude/settings.local.json
+
+# Generated documentation
+docs/_build/
+site/
+
+# Local configuration overrides
+config.local.*
+settings.local.*
+

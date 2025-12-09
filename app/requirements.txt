@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pyTelegramBotAPI
+ollama
+requests
+beautifulsoup4
+langchain-community
+mem0ai
+qdrant-client
+google-cloud-translate==3.15.3
+langdetect
+httpx>=0.24.0

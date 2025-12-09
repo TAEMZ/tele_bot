@@ -1,0 +1,292 @@
+from ollama import chat
+import json, re, logging
+import app.tools as tools
+from app.memory import get_relevant_context
+from app.translator import translate_to_english, translate_from_english, is_english, detect_language
+
+MODEL_NAME = "qwen3:1.7b"  # Using smaller model for faster responses on CPU
+MAX_CHARS = 4000
+
+def clean_response(text: str) -> str:
+    """Remove unwanted formatting & truncate."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    text = re.sub(r"\n\s*\n", "\n\n", text)
+    return text.strip()[:MAX_CHARS]
+
+def format_tool_result(name: str, result: dict) -> str:
+    """Convert tool output into readable sentences for the user."""
+    if "error" in result:
+        error_msg = result['error']
+
+        # Check if we should fallback to internet search
+        if result.get("use_internet_search") and result.get("search_query"):
+            # Automatically perform internet search for unknown symptoms
+            search_result = call_tool("internet_search", {"query": result["search_query"]})
+            return format_tool_result("internet_search", search_result)
+
+        # Provide helpful context for errors
+        if name == "drug_info":
+            # Extract possible drug name from error
+            if "not found" in error_msg.lower():
+                return (
+                    "⚠️ I couldn't find that exact drug name in the database.\n\n"
+                    "💡 Suggestions:\n"
+                    "- Check the spelling (e.g., 'paracetamol' not 'parsnemol')\n"
+                    "- Try the generic name instead of brand name\n"
+                    "- Common pain relievers: paracetamol, ibuprofen, aspirin\n\n"
+                    "If you're unsure about the drug name, describe your symptoms and I can help!"
+                )
+
+        return f"⚠️ {error_msg}"
+
+    if name == "drug_info":
+        purpose = result.get('purpose', 'N/A')[:200]
+        warnings = result.get('warnings', 'N/A')[:300]
+        return (
+            f"💊 **{result.get('brand_name', result.get('generic_name', 'Drug'))} Information:**\n\n"
+            f"**Generic Name:** {result.get('generic_name', 'N/A')}\n"
+            f"**Manufacturer:** {result.get('manufacturer_name', 'N/A')}\n\n"
+            f"**Purpose:** {purpose}\n\n"
+            f"**⚠️ Important Warnings:** {warnings}\n\n"
+            f"💡 Always follow dosage instructions and consult a doctor if symptoms persist."
+        )
+    elif name == "get_current_time":
+        return f"⏰ Current time: {result.get('time')}"
+    elif name == "internet_search":
+        summary = result.get("summary", "No results found.")
+        return f"🔍 **Medical Information:**\n\n{summary}\n\n💡 Always consult healthcare professionals for personalized advice."
+    elif name == "drug_interactions":
+        summary = result.get("summary", "No results found.")
+        return f"⚠️ **Drug Interaction Information:**\n\n{summary}\n\n💡 Consult your doctor or pharmacist before combining medications."
+    elif name == "get_symptom_advice":
+        advice = result.get("advice", {})
+        symptom = result.get("symptom", "your symptom")
+
+        # Extract medication from the result (it's stored differently in the tool response)
+        medication = None
+        if "medication_note" in result:
+            # Extract medication name from note
+            import re
+            match = re.search(r'taking (\w+)', result["medication_note"])
+            if match:
+                medication = match.group(1)
+
+        response = f"I understand you're experiencing {symptom}. Here's what can help:\n\n"
+
+        # Medication timeline
+        if medication and advice.get("medication_timeline"):
+            response += f"💊 **About {medication.title()}:**\n"
+            response += f"{advice['medication_timeline']}\n\n"
+
+        # Relief tips
+        if advice.get("relief_tips"):
+            response += "💡 **What to try right now:**\n"
+            for tip in advice["relief_tips"]:
+                response += f"• {tip}\n"
+            response += "\n"
+
+        # Warning signs
+        if advice.get("when_to_worry"):
+            response += "🚨 **See a doctor immediately if you have:**\n"
+            for warning in advice["when_to_worry"]:
+                response += f"• {warning}\n"
+            response += "\n"
+
+        # Common causes
+        if advice.get("common_causes"):
+            response += f"Common triggers: {', '.join(advice['common_causes'])}\n\n"
+
+        response += "If your symptoms don't improve in the next few hours or get worse, please see a healthcare professional."
+        return response
+    else:
+        return str(result)
+
+def call_tool(name: str, arguments: dict):
+    """Dispatch to available tool functions."""
+    logger = logging.getLogger(__name__)
+    logger.info(f"Calling tool: {name} with {arguments}")
+    if hasattr(tools, name):
+        func = getattr(tools, name)
+        return func(**arguments)
+    return {"error": f"Tool {name} not found"}
+
+def generate_response(user_prompt: str, user_id: str = None) -> str:
+    """
+    Generate a response to user prompt with automatic translation.
+
+    Workflow:
+    1. Detect language of user input
+    2. If not English, translate to English
+    3. Process with AI model (which works in English)
+    4. Translate response back to original language
+    """
+    logger = logging.getLogger(__name__)
+
+    # Step 1: Detect language
+    try:
+        detected_lang = detect_language(user_prompt)
+        logger.info(f"Detected language: {detected_lang}")
+    except Exception as e:
+        logger.error(f"Language detection failed: {e}")
+        detected_lang = 'en'
+
+    # Step 2: Translate to English if needed
+    english_prompt = user_prompt
+    needs_translation = not is_english(user_prompt)
+
+    logger.info(f"Is English: {not needs_translation}, Needs translation: {needs_translation}")
+
+    if needs_translation:
+        logger.info(f"Translating input from {detected_lang} to English")
+        translation_result = translate_to_english(user_prompt)
+        english_prompt = translation_result.get('translated_text', user_prompt)
+        # Update detected_lang from Google's detection
+        if translation_result.get('source_language'):
+            detected_lang = translation_result['source_language']
+        logger.info(f"Translated input: {english_prompt}")
+        logger.info(f"Confirmed source language from Google: {detected_lang}")
+
+    # Step 3: Get conversation context from memory (DISABLED for speed)
+    context = ""
+    # if user_id:
+    #     context = get_relevant_context(user_id, english_prompt, limit=5)
+
+    # Step 4: Build system prompt (always in English for the model)
+    system_prompt = (
+        "You are a knowledgeable, empathetic medical assistant helping patients understand health issues.\n\n"
+        "IMPORTANT GUIDELINES:\n"
+        "- Provide clear, actionable medical advice\n"
+        "- When someone mentions symptoms + medication, assess if it's normal or needs attention\n"
+        "- Suggest when to seek immediate medical care\n"
+        "- For misspelled drug names, try to identify the correct name\n"
+        "- Give practical symptom relief advice\n"
+        "- ALWAYS refer to previous conversation context when answering follow-up questions\n"
+        "- Maintain conversation continuity - remember what the user told you earlier\n\n"
+        "You can either:\n"
+        "1. Answer directly with medical advice (for symptom questions, general health info)\n"
+        "2. Use tools when specific drug/medical data is needed - output ONLY JSON:\n\n"
+        '{"function_call": {"name": "tool_name", "arguments": {...}}}\n\n'
+        "DO NOT mix text with JSON.\n\n"
+        "Available tools:\n"
+        "- drug_info(drug_name: str) - Get official drug information\n"
+        "- drug_interactions(drug_name: str, other_drug: str|None) - Check drug interactions\n"
+        "- internet_search(query: str) - Search medical information\n"
+        "- get_symptom_advice(symptom: str, medication_taken: str|None) - Get advice for symptoms like headache, fever, pain\n"
+        "- get_current_time() - Get current time\n\n"
+        "Example: 'I have headache after taking paracetamol' → Use get_symptom_advice('headache', 'paracetamol')\n"
+        "Example: 'Tell me about aspirin' → Use drug_info('aspirin')\n"
+    )
+
+    # Add context if available
+    if context:
+        system_prompt += f"\n\n📝 PREVIOUS CONVERSATION CONTEXT (use this to maintain continuity):\n{context}\n"
+
+    # Pre-process: detect if this is a symptom + medication query
+    prompt_lower = english_prompt.lower()
+    symptom_keywords = ["headache", "fever", "pain", "stomach", "nausea", "dizzy", "cough", "cold"]
+    medication_keywords = ["take", "took", "taking", "paracetamol", "ibuprofen", "aspirin", "medicine", "drug", "pill"]
+
+    has_symptom = any(keyword in prompt_lower for keyword in symptom_keywords)
+    has_medication = any(keyword in prompt_lower for keyword in medication_keywords)
+
+    # If symptom + medication mentioned, directly use symptom advisor
+    if has_symptom and has_medication and ("still" in prompt_lower or "not working" in prompt_lower or "feeling bad" in prompt_lower):
+        # Extract symptom
+        detected_symptom = None
+        for symptom in symptom_keywords:
+            if symptom in prompt_lower:
+                detected_symptom = symptom
+                break
+
+        # Extract medication (try to correct common misspellings)
+        medication_map = {
+            "parsnemol": "paracetamol",
+            "paracetmol": "paracetamol",
+            "ibuprofin": "ibuprofen",
+            "asprin": "aspirin"
+        }
+
+        detected_med = None
+        for word in prompt_lower.split():
+            clean_word = word.strip(".,!?")
+            if clean_word in medication_map:
+                detected_med = medication_map[clean_word]
+                break
+            elif clean_word in medication_keywords:
+                detected_med = clean_word
+                break
+
+        if detected_symptom:
+            tool_result = call_tool("get_symptom_advice", {
+                "symptom": detected_symptom,
+                "medication_taken": detected_med
+            })
+            english_response = format_tool_result("get_symptom_advice", tool_result)
+
+            # Translate back if needed
+            if needs_translation and detected_lang != 'en':
+                logger.info(f"Translating response back to {detected_lang}")
+                translation_result = translate_from_english(english_response, detected_lang)
+                return translation_result.get('translated_text', english_response)
+
+            return english_response
+
+    # Step 5: Generate response from AI model
+    try:
+        response = chat(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": english_prompt}
+            ]
+        )
+        text = response["message"]["content"].strip()
+
+        # Attempt parsing as function_call JSON
+        english_response = None
+        try:
+            parsed = json.loads(text)
+            if "function_call" in parsed:
+                fn = parsed["function_call"]["name"]
+                args = parsed["function_call"].get("arguments", {})
+                tool_result = call_tool(fn, args)
+                english_response = format_tool_result(fn, tool_result)
+        except json.JSONDecodeError:
+            # Try to extract JSON block manually
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    if "function_call" in parsed:
+                        fn = parsed["function_call"]["name"]
+                        args = parsed["function_call"].get("arguments", {})
+                        tool_result = call_tool(fn, args)
+                        english_response = format_tool_result(fn, tool_result)
+                except Exception as e:
+                    logging.error(f"Fallback JSON parse failed: {e}")
+
+        # If no tool call, use the assistant's text response
+        if english_response is None:
+            english_response = clean_response(text)
+
+        # Step 6: Translate response back to original language
+        if needs_translation and detected_lang != 'en':
+            logger.info(f"Translating response back to {detected_lang}")
+            translation_result = translate_from_english(english_response, detected_lang)
+            final_response = translation_result.get('translated_text', english_response)
+            logger.info(f"Final translated response: {final_response}")
+            return final_response
+
+        return english_response
+
+    except Exception as e:
+        error_msg = f"⚠️ Sorry, I couldn't generate a response: {e}"
+
+        # Translate error message if needed
+        if needs_translation and detected_lang != 'en':
+            translation_result = translate_from_english(error_msg, detected_lang)
+            return translation_result.get('translated_text', error_msg)
+
+        return error_msg
